@@ -44,7 +44,19 @@ int main() {
     }
 
     printf("Connected to FTP server.\n");
-
+    printf("Hello!! Please Authenticate to run server commands\n");
+    printf("1. type \"USER\" followed by a space and your username\n");
+    printf("2. type \"PASS\" followed by a space and your password\n");
+    printf("\n\"QUIT\" to close connection at any moment\n");
+    printf("Once Authenticated\n");
+    printf("this is the list of commands :\n");
+    printf("\"STOR\" + space + filename to send a file to the server\n");
+    printf("\"RETR\" + space + filename |to download a file from the server\n");
+    printf("\"LIST\" to to list all the files under the current server directory\n");
+    printf("\"CWD\" + space + directory to change the current server directory\n");
+    printf("\"PWD\" to display the current server directory\n");
+    printf("Add \"!\" before the last three commands to apply them locally\n\n");
+    printf("220 Service ready for new user.\n");
     // Main client loop
     while (1) {
         printf("ftp> ");
@@ -301,5 +313,5 @@ void print_working_directory(int sockfd) {
     buffer[bytes_received] = '\0'; // Null-terminate the received string
 
     // Print the server's response
-    printf("Server's Current Working Directory: %s\n", buffer);
+    printf("%s\n", buffer); // make it similar to the server
 }

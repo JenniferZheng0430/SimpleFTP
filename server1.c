@@ -38,7 +38,7 @@ void receive_file(const char *filename, int sockfd);
  * @return int Returns 0 on successful parsing, 1 on file open error.
  */
 int parse_config_file() {
-    FILE *file = fopen("users.txt", "r");
+    FILE *file = fopen("users.csv", "r");
     if (!file) {
         perror("Error opening file");
         return 1; // File open error
@@ -49,15 +49,16 @@ int parse_config_file() {
         line[strcspn(line, "\n")] = 0; // Remove newline character
 
         // Tokenize the line to get username and password
-        char *token = strtok(line, " ");
+        char *token = strtok(line, ",");
         if (token != NULL && user_count < MAX_USERS) {
             strncpy(users[user_count].username, token, BUF_SIZE - 1);
-            token = strtok(NULL, " ");
+            token = strtok(NULL, ",");
             if (token != NULL) {
                 strncpy(users[user_count].password, token, BUF_SIZE - 1);
                 user_count++; // Increment user count
             }
         }
+        printf("Loaded user: %s\n", users[user_count - 1].password);
     }
     fclose(file);
     return 0; // Successful parsing
@@ -80,6 +81,92 @@ int authenticate_user(const char *username, const char *password) {
     }
     return 0; // Authentication failed
 }
+/**
+ * Find whether user exist
+ */
+ int findUsername(char name[]){ 
+	for(int i=0;i<user_count;i++){
+		if(strcmp(name, users[i].username)==0){
+			return i;
+		}
+	}
+	return -1;
+}
+/**
+ * CHeck whether password is correct
+ 
+ */
+int matchPassword(int userIdx, char* pass){
+	if(strcmp(users[userIdx].password, pass)==0){
+		return 1;
+	}
+	else{
+		return 0;
+	}
+}
+/**
+ * change directory [when user login]
+*/
+void changeWorkingDirectory(const char *username) {
+    char userFolder[256];
+    snprintf(userFolder, sizeof(userFolder), "server/%s", username);
+
+    if (chdir(userFolder) != 0) {
+        perror("chdir");
+        exit(EXIT_FAILURE);
+    }
+}
+
+/**
+ * handle PASS command after user has logged in
+ */
+void handlePASS(int client_sock, int userIdx){
+	char pass_command[BUF_SIZE];
+	int bytes_received=recv(client_sock,pass_command,sizeof(pass_command),0);
+    pass_command[bytes_received] = '\0';
+	char* key_word = strtok(pass_command, " ");
+    char* pass = strtok(NULL, "\n");
+	if(strcmp(key_word, "PASS")==0){
+        printf("pass: %s\n", pass);
+		if(matchPassword(userIdx, pass)==1){
+			send(client_sock, "230 User logged in, proceed.", BUF_SIZE, 0);
+            authenticated_sockets[client_sock] = 1;
+			printf("Server sent \" 230 User logged in, proceed.\" \n");
+		}
+		else{
+			send(client_sock, "530 Not logged in.", BUF_SIZE, 0);
+			printf("Server sent \" 530 Not logged in.\" \n");
+		}
+	}
+	else{
+		send(client_sock, "530 Not logged in.", BUF_SIZE, 0);
+		printf("Server sent \" 530 Not logged in.\" \n");
+	}
+    if (authenticated_sockets[client_sock] == 1) {
+        changeWorkingDirectory(users[userIdx].username);
+    }
+}
+
+/**
+ * handle USER command
+ */
+int handle_USER(int client_sock,char name[]){
+    int userIdx = findUsername(name);
+    if(userIdx==-1){
+        send(client_sock, "530 Not logged in.\n", BUF_SIZE, 0);
+        printf("530 Not logged in\n");
+        return 0;
+    }
+    else{
+        send(client_sock, "331 Username OK, need password\n", BUF_SIZE, 0);
+        printf("331 Username OK, need password\n");
+        handlePASS(client_sock, userIdx);
+        return 1;
+    }
+}
+
+
+
 
 /**
  * Handles commands received from clients.
@@ -104,6 +191,7 @@ void handle_user_command(int client_sock, fd_set *master_set, int *max_fd) {
     // Parse the command and its arguments
     char *command = strtok(buffer, " ");
     char *argument = strtok(NULL, "\n");
+    int userIdx;
 
     // Execute the command if it is valid
     if (command != NULL) {
@@ -124,6 +212,10 @@ void execute_command(int client_sock, const char *command, const char *argument)
     } else if (strcmp(command, "STOR") == 0) {
         receive_file(argument, client_sock); // Handle file receiving from the client
     }
+    if(strcmp(command, "USER")==0){
+        handle_USER(client_sock,argument);
+    }
+   
     // Additional FTP commands can be handled here
 }
 
@@ -271,14 +363,95 @@ int main() {
 
                     printf("New connection from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
                 } else {
-                    // Handle commands from connected clients
-                    handle_user_command(i, &master_set, &fd_max);
+                    char buffer[BUF_SIZE];
+                    ssize_t bytes_received = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
+
+                    // Check for client disconnection or reception error
+                    if (bytes_received <= 0) {
+                        close(client_sock); // Close the client socket
+                        FD_CLR(client_sock, &master_set); // Remove from the master set
+                        break;
+                    }
+
+                    buffer[bytes_received] = '\0'; // Ensure the received data is null-terminated
+
+                    // Parse the command and its arguments
+                    char *command = strtok(buffer, " ");
+                    char *argument = strtok(NULL, "\n");
+                    char server_res[BUF_SIZE];
+                    if (strcmp(command, "USER") == 0) {
+                        int userIdx =findUsername(argument);
+                        handle_USER(client_sock,argument);
+                        continue;
+                    } else if (strcmp(command, "PASS") == 0) {
+                        send(client_sock, "Please enter username first", BUF_SIZE, 0);
+						printf("Server sent \" 530 Not logged in.\" \n");
+                    } 
+                    if (authenticated_sockets[client_sock] == 0) {
+                        send(client_sock, "530 Not logged in.\n", BUF_SIZE, 0);
+                        printf("Server: 530 Not logged in.\" \n");
+						continue;
+                    }
+                    if (authenticated_sockets[client_sock] == 1) {
+                        if (strcmp(command, "USER") == 0){
+                            send(client_sock, "You have logged in, please quit before you login again.\n", BUF_SIZE, 0);
+                        }
+                        else if (strcmp(command, "PASS") == 0){
+                            send(client_sock, "You have logged in, please quit before you login again.\n", BUF_SIZE, 0);
+                        }
+                    }
+                        else if(strcmp(command, "PWD")==0){
+						    char server_pwd[BUF_SIZE];
+						    bzero(server_pwd, sizeof(server_pwd));
+						    bzero(server_res, sizeof(server_res));
+						
+						    getcwd(server_pwd, sizeof(server_pwd)); 
+						    strcpy(server_res,"257 ");
+                            strcat(server_res, server_pwd);
+
+						    // send server 257 and pathname to client
+						    send(client_sock, server_res, strlen(server_res), 0);
+                        }
+                    // handle_user_command(i, &master_set, &fd_max);
                 }
             }
         }
     }
-
     // Clean up
     close(server_sock);
     return 0;
 }
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * handle PASS command
+ */
+
+// int handle_PASS(int client_sock,int userIdx,char pass[]){
+//     if(userIdx==-1){
+//         send(client_sock, "530 Not logged in, please enter correct username first\n", BUF_SIZE, 0);
+//         printf("530 Not logged in, please enter correct username first\n");
+//         return 0;
+//     }
+//     else{
+//         if(matchPassword(userIdx, pass)==1){
+//             send(client_sock, "230 User logged in, proceed\n", BUF_SIZE, 0);
+//             printf("230 User logged in, proceed\n");
+//             return 1;
+//         }
+//         else{
+//             send(client_sock, "530 Not logged in\n", BUF_SIZE, 0);
+//             printf("530 Not logged in\n");
+//             return 0;
+//         }
+//     }
+// }
