@@ -15,6 +15,8 @@
 #define BUF_SIZE 1024
 #define MAX_USERS 10
 
+// Global variable for the data connection socket
+int data_socket = -1;
 typedef struct {
     char username[BUF_SIZE];
     char password[BUF_SIZE];
@@ -29,9 +31,9 @@ int parse_config_file();
 int authenticate_user(const char *username, const char *password);
 void handle_user_command(int client_sock, fd_set *master_set, int *max_fd);
 void execute_command(int client_sock, const char *command, const char *argument);
-void send_file(const char *filename, int sockfd);
-void receive_file(const char *filename, int sockfd);
-
+void send_file(const char *filename);
+void receive_file(const char *filename);
+void handle_PORT(int client_sock, char *command);
 /**
  * Parses the configuration file to load usernames and passwords.
  *
@@ -115,6 +117,54 @@ void changeWorkingDirectory(const char *username) {
         perror("chdir");
         exit(EXIT_FAILURE);
     }
+}
+// Function to handle PORT command
+void handle_PORT(int client_sock, char *command) {
+    char client_ip[INET_ADDRSTRLEN];
+    int client_port;
+    int h1, h2, h3, h4, p1, p2;
+
+    // Parse the IP address and port number from the PORT command
+    if (sscanf(command, "PORT %d,%d,%d,%d,%d,%d", &h1, &h2, &h3, &h4, &p1, &p2) != 6) {
+        send(client_sock, "501 Syntax error in parameters or arguments.\r\n", BUF_SIZE, 0);
+        return;
+    }
+
+    // Reconstruct the IP address and port
+    snprintf(client_ip, sizeof(client_ip), "%d.%d.%d.%d", h1, h2, h3, h4);
+    client_port = p1 * 256 + p2;
+
+    // Create a data socket
+    int data_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (data_sock < 0) {
+        perror("Failed to create data socket");
+        send(client_sock, "425 Can't open data connection.\r\n", BUF_SIZE, 0);
+        return;
+    }
+
+    // Set up the data server address
+    struct sockaddr_in data_addr;
+    memset(&data_addr, 0, sizeof(data_addr));
+    data_addr.sin_family = AF_INET;
+    data_addr.sin_port = htons(client_port);
+    if (inet_pton(AF_INET, client_ip, &data_addr.sin_addr) <= 0) {
+        perror("Invalid address/ Address not supported");
+        close(data_sock);
+        send(client_sock, "425 Can't open data connection.\r\n", BUF_SIZE, 0);
+        return;
+    }
+
+    // Connect to the client on the specified port
+    if (connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) < 0) {
+        perror("Connection to data port failed");
+        close(data_sock);
+        send(client_sock, "425 Can't open data connection.\r\n", BUF_SIZE, 0);
+        return;
+    }
+    // Connection established
+    send(client_sock, "200 PORT command successful.\r\n", BUF_SIZE, 0);
+    // close the data socket after the transfer is complete
+    // close(data_sock);
 }
 
 /**
@@ -207,17 +257,39 @@ void handle_user_command(int client_sock, fd_set *master_set, int *max_fd) {
  * @param argument The argument for the FTP command.
  */
 void execute_command(int client_sock, const char *command, const char *argument) {
-    if (strcmp(command, "RETR") == 0) {
-        send_file(argument, client_sock); // Handle file sending to the client
+    if (strcmp(command, "PORT") == 0) {
+        handle_PORT(client_sock, argument);
+    } else if (strcmp(command, "RETR") == 0) {
+        if (data_socket != -1) {
+            send_file(argument); // Use data_socket for file transfer
+            close(data_socket); // Close the data socket after the operation
+            data_socket = -1;
+        } else {
+            send(client_sock, "425 Use PORT command first.\r\n", 30, 0);
+        }
     } else if (strcmp(command, "STOR") == 0) {
-        receive_file(argument, client_sock); // Handle file receiving from the client
+        if (data_socket != -1) {
+            receive_file(argument); // Use data_socket for file transfer
+            close(data_socket); // Close the data socket after the operation
+            data_socket = -1;
+        } else {
+            send(client_sock, "425 Use PORT command first.\r\n", 30, 0);
+        }
+    } else if (strcmp(command, "LIST") == 0) {
+        if (data_socket != -1) {
+            // Implement LIST command handling here
+            close(data_socket); // Close the data socket after the operation
+            data_socket = -1;
+        } else {
+            send(client_sock, "425 Use PORT command first.\r\n", 30, 0);
+        }
     }
-    if(strcmp(command, "USER")==0){
-        handle_USER(client_sock,argument);
+    else{
+        send(client_sock, "Syntax error, command unrecognized.\r\n", 40, 0);
     }
-   
-    // Additional FTP commands can be handled here
+    // Commands not related to file transfer are not handled here
 }
+
 
 /**
  * Sends a file to the client over the socket.
@@ -225,11 +297,11 @@ void execute_command(int client_sock, const char *command, const char *argument)
  * @param filename The name of the file to be sent.
  * @param sockfd The socket file descriptor for sending the file.
  */
-void send_file(const char *filename, int sockfd) {
+void send_file(const char *filename) {
     FILE *file = fopen(filename, "rb");
     if (file == NULL) {
         perror("Error opening file");
-        send(sockfd, "550 File not found.\r\n", 20, 0);
+        send(data_socket, "550 File not found.\r\n", 20, 0);
         return;
     }
 
@@ -238,14 +310,14 @@ void send_file(const char *filename, int sockfd) {
 
     // Read from the file and send data in chunks
     while ((bytes_read = fread(buffer, 1, BUF_SIZE, file)) > 0) {
-        if (send(sockfd, buffer, bytes_read, 0) < 0) {
+        if (send(data_socket, buffer, bytes_read, 0) < 0) {
             perror("Error sending file");
             break;
         }
     }
 
     fclose(file); // Close the file after sending
-    send(sockfd, "226 Transfer complete.\r\n", 24, 0); // Notify the client of completion
+    send(data_socket, "226 Transfer complete.\r\n", 24, 0); // Notify the client of completion
 }
 
 /**
@@ -254,13 +326,13 @@ void send_file(const char *filename, int sockfd) {
  * @param filename The name of the file to be saved on the server.
  * @param sockfd The socket file descriptor for communication with the client.
  */
-void receive_file(const char *filename, int sockfd) {
+void receive_file(const char *filename) {
     // Open the file for writing in binary mode
     FILE *file = fopen(filename, "wb");
     if (file == NULL) {
         perror("Error opening file");
         // If unable to open the file, send an error message to the client
-        send(sockfd, "550 Cannot create file.\r\n", 24, 0);
+        send(data_socket, "550 Cannot create file.\r\n", 24, 0);
         return;
     }
 
@@ -268,7 +340,7 @@ void receive_file(const char *filename, int sockfd) {
     ssize_t bytes_received;
 
     // Receive data from the client until the entire file is received
-    while ((bytes_received = recv(sockfd, buffer, BUF_SIZE, 0)) > 0) {
+    while ((bytes_received = recv(data_socket, buffer, BUF_SIZE, 0)) > 0) {
         // Write the received bytes to the file
         size_t bytes_written = fwrite(buffer, 1, bytes_received, file);
         if (bytes_written < bytes_received) {
@@ -286,8 +358,9 @@ void receive_file(const char *filename, int sockfd) {
     fclose(file);
 
     // Optionally, send a completion message to the client
-    send(sockfd, "226 Transfer complete.\r\n", 24, 0);
+    send(data_socket, "226 Transfer complete.\r\n", 24, 0);
 }
+
 
 
 
@@ -386,20 +459,20 @@ int main() {
                     } else if (strcmp(command, "PASS") == 0) {
                         send(client_sock, "Please enter username first", BUF_SIZE, 0);
 						printf("Server sent \" 530 Not logged in.\" \n");
+                        continue;
                     } 
                     if (authenticated_sockets[client_sock] == 0) {
                         send(client_sock, "530 Not logged in.\n", BUF_SIZE, 0);
                         printf("Server: 530 Not logged in.\" \n");
 						continue;
                     }
-                    if (authenticated_sockets[client_sock] == 1) {
+                    else if (authenticated_sockets[client_sock] == 1) {
                         if (strcmp(command, "USER") == 0){
                             send(client_sock, "You have logged in, please quit before you login again.\n", BUF_SIZE, 0);
                         }
                         else if (strcmp(command, "PASS") == 0){
                             send(client_sock, "You have logged in, please quit before you login again.\n", BUF_SIZE, 0);
                         }
-                    }
                         else if(strcmp(command, "PWD")==0){
 						    char server_pwd[BUF_SIZE];
 						    bzero(server_pwd, sizeof(server_pwd));
@@ -412,11 +485,23 @@ int main() {
 						    // send server 257 and pathname to client
 						    send(client_sock, server_res, strlen(server_res), 0);
                         }
+                        else if(strcmp(command, "QUIT")==0){
+                            send(client_sock, "221 Service closing control connection.\n", BUF_SIZE, 0);
+                            printf("Server sent \"221 Service closing control connection.\" \n");
+                            close(client_sock);
+                            FD_CLR(client_sock, &master_set);
+                            break;
+                        }
+                        else{
+                            execute_command(client_sock, command, argument);
+                        }
+                        
                     // handle_user_command(i, &master_set, &fd_max);
-                }
+                    }   
+                }   
             }
         }
-    }
+    }      
     // Clean up
     close(server_sock);
     return 0;
@@ -454,4 +539,75 @@ int main() {
 //             return 0;
 //         }
 //     }
+// }
+
+// void send_file(const char *filename, int sockfd) {
+//     FILE *file = fopen(filename, "rb");
+//     if (file == NULL) {
+//         perror("Error opening file");
+//         send(sockfd, "550 File not found.\r\n", 20, 0);
+//         return;
+//     }
+
+//     char buffer[BUF_SIZE];
+//     size_t bytes_read;
+
+//     // Read from the file and send data in chunks
+//     while ((bytes_read = fread(buffer, 1, BUF_SIZE, file)) > 0) {
+//         if (send(sockfd, buffer, bytes_read, 0) < 0) {
+//             perror("Error sending file");
+//             break;
+//         }
+//     }
+
+//     fclose(file); // Close the file after sending
+//     send(sockfd, "226 Transfer complete.\r\n", 24, 0); // Notify the client of completion
+// }
+
+// void receive_file(const char *filename, int sockfd) {
+//     // Open the file for writing in binary mode
+//     FILE *file = fopen(filename, "wb");
+//     if (file == NULL) {
+//         perror("Error opening file");
+//         // If unable to open the file, send an error message to the client
+//         send(sockfd, "550 Cannot create file.\r\n", 24, 0);
+//         return;
+//     }
+
+//     char buffer[BUF_SIZE];
+//     ssize_t bytes_received;
+
+//     // Receive data from the client until the entire file is received
+//     while ((bytes_received = recv(sockfd, buffer, BUF_SIZE, 0)) > 0) {
+//         // Write the received bytes to the file
+//         size_t bytes_written = fwrite(buffer, 1, bytes_received, file);
+//         if (bytes_written < bytes_received) {
+//             perror("Error writing to file");
+//             break; // Break the loop if there is a file writing error
+//         }
+//     }
+
+//     // Check for errors in receiving data
+//     if (bytes_received < 0) {
+//         perror("Error receiving file");
+//     }
+
+//     // Close the file after receiving all data
+//     fclose(file);
+
+//     // Optionally, send a completion message to the client
+//     send(sockfd, "226 Transfer complete.\r\n", 24, 0);
+// }
+
+// void execute_command(int client_sock, const char *command, const char *argument) {
+//     if (strcmp(command, "RETR") == 0) {
+//         send_file(argument, client_sock); // Handle file sending to the client
+//     } else if (strcmp(command, "STOR") == 0) {
+//         receive_file(argument, client_sock); // Handle file receiving from the client
+//     }
+//     if(strcmp(command, "USER")==0){
+//         handle_USER(client_sock,argument);
+//     }
+   
+//     // Additional FTP commands can be handled here
 // }

@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <dirent.h>
 
+#define SERVER_ADDR "server_ip_address" // Replace with actual server IP address
 #define SERVER_CONTROL_PORT 21 // FTP standard control port
 #define BUF_SIZE 1024
 
@@ -16,10 +17,13 @@ void receive_file(int sockfd, const char *filename);
 void send_file(int sockfd, const char *filename);
 void handle_stor_command(int server_sd, const char *filename);
 void handle_list_command(int server_sd);
-void execute_command(int server_sd, const char *command);
+void execute_command(int server_sd, const char *command,int login_status);
 void print_local_directory();
 void change_local_directory(const char *path);
 void print_working_directory(int sockfd);
+int changeToClientFolder(const char *simpleFtpPath);
+int listDirectoryContents();
+
 
 int main() {
     int server_sd;
@@ -57,50 +61,97 @@ int main() {
     printf("\"PWD\" to display the current server directory\n");
     printf("Add \"!\" before the last three commands to apply them locally\n\n");
     printf("220 Service ready for new user.\n");
+
+    char currentDirectory[256];
+    // Get the current working directory (path to "SimpleFTP")
+    if (getcwd(currentDirectory, sizeof(currentDirectory)) == NULL) {
+        perror("getcwd");
+        exit(EXIT_FAILURE);
+    }
+
+    // Change the working directory to the "client" folder within "SimpleFTP"
+    if (changeToClientFolder(currentDirectory) != 0) {
+        fprintf(stderr, "Failed to change working directory to the client folder\n");
+        exit(EXIT_FAILURE);
+    }
+    changeToClientFolder(currentDirectory);
+    int login_status = 0;
     // Main client loop
     while (1) {
         printf("ftp> ");
         fgets(command, BUF_SIZE, stdin);
         command[strcspn(command, "\n")] = 0; // Remove newline character
-
-        if (strcmp(command, "QUIT") == 0) {
-            printf("Exiting FTP client.\n");
-            break;
+        char ftpCommand[BUF_SIZE];
+        char ftpArg[BUF_SIZE];
+        if (sscanf(command, "%s %s", ftpCommand, ftpArg) == 2) {
+        } else if (sscanf(command, "%s", ftpCommand) == 1) {
+        } else {
+            // Failed to parse
+            printf("Invalid input\n");
         }
-
-        execute_command(server_sd, command);
+        if (strcmp(command, "QUIT") == 0) {
+            char buffer[BUF_SIZE];
+            send(server_sd, command, strlen(command), 0);
+            recv(server_sd, buffer, BUF_SIZE, 0);
+            printf("%s\n", buffer);
+            login_status = 0;
+            break;
+        }else if((strcmp(ftpCommand, "USER") == 0 && login_status == 1) || (strcmp(ftpCommand, "PASS") == 0 && login_status == 1)){
+            printf("You are already logged in, Please Quit first\n");
+        }else if (strcmp(ftpCommand, "USER") == 0 && login_status == 0) {
+            send(server_sd, command, strlen(command), 0);
+            char buffer[BUF_SIZE];
+            recv(server_sd, buffer, BUF_SIZE, 0);
+            printf("%s\n", buffer);
+        }else if (strcmp(ftpCommand, "PASS") == 0 && login_status == 0) {
+            send(server_sd, command, strlen(command), 0);
+            char buffer[BUF_SIZE];
+            recv(server_sd, buffer, BUF_SIZE, 0);
+            printf("%s\n", buffer);
+            if (strncmp(buffer, "230", 3) == 0) {
+                login_status = 1;
+            }
+        }else{
+             execute_command(server_sd, command,login_status);
+        }
+        
     }
 
     close(server_sd);
     return 0;
 }
 
-void execute_command(int server_sd, const char *command) {
+void execute_command(int server_sd, const char *command,int login_status) {
     char buffer[BUF_SIZE];
     char *cmd, *arg;
     strcpy(buffer, command);
 
     cmd = strtok(buffer, " ");
     arg = strtok(NULL, " ");
-
-    if (strcmp(cmd, "RETR") == 0 && arg) {
+   
+    if(login_status == 1){
+        if (strcmp(cmd, "RETR") == 0 && arg) {
         handle_retr_command(server_sd, arg);
-    } else if (strcmp(cmd, "STOR") == 0 && arg) {
-        handle_stor_command(server_sd, arg);
-    } else if (strcmp(cmd, "LIST") == 0) {
-        handle_list_command(server_sd);
-    } else if (strcmp(cmd, "!LIST") == 0) {
-        print_local_directory();
-    } else if (strcmp(cmd, "!CWD") == 0 && arg) {
-        change_local_directory(arg);
-    } else if (strcmp(cmd, "PWD") == 0) {
-        print_working_directory(server_sd);
-    } else {
-        // Send other commands to server
-        send(server_sd, command, strlen(command), 0);
-        recv(server_sd, buffer, BUF_SIZE, 0);
-        printf("%s\n", buffer);
+        } else if (strcmp(cmd, "STOR") == 0 && arg) {
+            handle_stor_command(server_sd, arg);
+        } else if (strcmp(cmd, "LIST") == 0) {
+            handle_list_command(server_sd);
+        } else if (strcmp(cmd, "!LIST") == 0) {
+            print_local_directory();
+        } else if (strcmp(cmd, "!CWD") == 0 && arg) {
+            change_local_directory(arg);
+        } else if (strcmp(cmd, "!PWD") == 0) {
+            print_working_directory(server_sd);
+        } else {
+            // Send other commands to server
+            send(server_sd, command, strlen(command), 0);
+            recv(server_sd, buffer, BUF_SIZE, 0);
+            printf("%s\n", buffer);
+        }
+    }else{
+        printf("Please Authenticate first and then to run server commands\n");
     }
+    
 }
 
 // Function definitions for handle_retr_command, handle_stor_command, etc.
@@ -113,7 +164,7 @@ void execute_command(int server_sd, const char *command) {
  * @param server_sd The socket file descriptor connected to the server.
  * @param filename The name of the file to retrieve from the server.
  */
-void handle_retr_command(int server_sd, const char *filename) {
+void handle_retr_command(int server_sd, const char *filename){
     char buffer[BUF_SIZE];
 
     // Send the RETR command to the server
@@ -265,9 +316,10 @@ void print_local_directory() {
         perror("Unable to open local directory");
         return;
     }
-
-    printf("Local directory listing:\n");
     while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+                continue;
+            }
         printf("%s\n", entry->d_name); // Print each directory entry's name
     }
 
@@ -295,23 +347,47 @@ void change_local_directory(const char *path) {
  */
 void print_working_directory(int sockfd) {
     char buffer[BUF_SIZE];
+    char server_pwd[BUF_SIZE];
+    char server_res[BUF_SIZE];
+	bzero(server_pwd, sizeof(server_pwd));
+	bzero(server_res, sizeof(server_res));
+						
+	getcwd(server_pwd, sizeof(server_pwd));
+    printf("%s\n", server_pwd); 
+    // // Send the PWD command to the server
+    // strcpy(buffer, "PWD");
+    // if (send(sockfd, buffer, strlen(buffer), 0) < 0) {
+    //     perror("Error sending PWD command");
+    //     return;
+    // }
 
-    // Send the PWD command to the server
-    strcpy(buffer, "PWD");
-    if (send(sockfd, buffer, strlen(buffer), 0) < 0) {
-        perror("Error sending PWD command");
-        return;
-    }
+    // // Wait for server's response
+    // ssize_t bytes_received = recv(sockfd, buffer, BUF_SIZE, 0);
+    // if (bytes_received < 0) {
+    //     perror("Error receiving server response");
+    //     return;
+    // }
 
-    // Wait for server's response
-    ssize_t bytes_received = recv(sockfd, buffer, BUF_SIZE, 0);
-    if (bytes_received < 0) {
-        perror("Error receiving server response");
-        return;
-    }
+    // buffer[bytes_received] = '\0'; // Null-terminate the received string
 
-    buffer[bytes_received] = '\0'; // Null-terminate the received string
-
-    // Print the server's response
-    printf("%s\n", buffer); // make it similar to the server
+    // // Print the server's response
+    // printf("%s\n", buffer); // make it similar to the server
 }
+
+int changeToClientFolder(const char *simpleFtpPath) {
+    char clientFolderPath[256];
+
+    // Construct the path to the "client" folder
+    snprintf(clientFolderPath, sizeof(clientFolderPath), "%s/client", simpleFtpPath);
+
+    // Change the working directory to the "client" folder
+    if (chdir(clientFolderPath) != 0) {
+        perror("chdir");
+        return -1; // Return an error code
+    }
+
+    return 0; // Success
+}
+
+// else if (strcmp(cmd, "PWD") == 0) {
+//         print_working_directory(server_sd);
